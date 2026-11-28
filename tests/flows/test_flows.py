@@ -614,7 +614,7 @@ def test_transfer_fee_rounds_up_and_does_not_count_toward_limit(bot):
 
 def test_balance_of_others_does_not_create_accounts(bot):
     assert bot.repos.wallet.peek_stats(99) is None
-    assert bot.repos.db.conn.execute("SELECT COUNT(*) FROM users WHERE user_id=99").fetchone()[0] == 0
+    assert bot.repos.db.conn.execute("SELECT COUNT(*) FROM accounts WHERE user_id=99").fetchone()[0] == 0
 
 
 def test_daily_cannot_be_claimed_again_if_clock_goes_back(bot):
@@ -896,7 +896,9 @@ def test_pachinko_sets_play_in_one_go_and_settle_once(bot, monkeypatch):
     assert "×" in it.sent[0]["embed"].description and "5セット" in it.sent[0]["embed"].description
     final = it.edits[-1]["embed"]
     assert "5セット" in final.description or "セット" in final.description
-    assert len(it.edits) == 2 + 5 + 1 and ledger_matches_balance(bot)  # 打ち出し2コマ + セットの数ぶん + 結果
+    tables = [e for e in it.edits[:-1] if "入賞" in e["embed"].description and "回転目" not in e["embed"].description]
+    # 表はセットの数ぶん（あいだに、ガセのリーチが入ることがある）
+    assert len(tables) == 5 and ledger_matches_balance(bot)
     assert_clean(bot)
 
 

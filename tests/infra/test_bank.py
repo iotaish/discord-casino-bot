@@ -8,7 +8,7 @@ from domain import rates, teiai
 from domain.types import INITIAL_BALANCE
 from infra.db.repositories import open_repositories
 from tests.fakes import must
-from tests.support import make_test_bot
+from tests.support import give_test_kyosai_units, make_test_bot, set_test_balance, set_test_debt
 
 pytestmark = pytest.mark.real_scope
 
@@ -34,13 +34,7 @@ def give_units(eco, uid, n):
     """帝愛の持ち口から uid へ共済の口を n 口移す（口の持ち主が超過損失を負担する場面のため）。"""
     eco.wallet.balance(uid)
     with eco.db.tx():
-        eco.kyosai.bank_sync(G, NOW)
-        eco.db.conn.execute("UPDATE kyosai_units SET units=units-? WHERE guild_id=? AND user_id=0", (n, G))
-        eco.db.conn.execute(
-            "INSERT INTO kyosai_units (guild_id, user_id, units) VALUES (?, ?, ?) "
-            "ON CONFLICT(guild_id, user_id) DO UPDATE SET units=units+excluded.units",
-            (G, uid, n),
-        )
+        give_test_kyosai_units(eco, uid, n, guild_id=G, now=NOW)
 
 
 def test_deposit_keeps_only_the_reserve_ratio_as_cash(eco):
@@ -139,7 +133,9 @@ def test_trust_interest_is_never_taken_from_the_trust_itself(eco):
     assert eco.wallet.balance(A) == a0 + paid
     s = eco.bank.bank_status(NOW + 86400)
     assert paid > 0 and s["excess_unpaid"] == 0  # 手元で払えない分は、熱浴と帝愛共済の口の持ち主が負担する（#32・#34）
-    charged = eco.db.conn.execute("SELECT kyosai_charged FROM teiai_bank WHERE guild_id=?", (G,)).fetchone()[0]
+    charged = eco.db.conn.execute(
+        "SELECT COALESCE((SELECT charged FROM kyosai_state WHERE guild_id=?), 0)", (G,)
+    ).fetchone()[0]
     assert charged + s["thermostat"]["bailed"] == pytest.approx(paid, abs=1)
 
 
@@ -173,7 +169,7 @@ def test_grace_starts_at_the_threshold_and_ends_when_debt_falls(eco):
     go_into_debt(eco, A, 20_000)
     assert eco.bank.grace_until(A) is not None and [u for u, *_ in eco.bank.grace_list()] == [A]
     with eco.db.tx():
-        eco.db.conn.execute("UPDATE users SET debt=100 WHERE user_id=?", (A,))
+        set_test_debt(eco, A, 100, guild_id=G)
         eco.debt.after_debt_change(G, A)
     assert eco.bank.grace_until(A) is None
 
@@ -197,10 +193,8 @@ def test_grace_penalty_and_a1_work_together_in_strict_guild_scope(eco):
     eco.wallet.credit(A, 10_000, "テスト")
     eco.bank.bank_deposit(A, 4_000, NOW)
     with eco.db.tx():
-        eco.db.conn.execute(
-            "UPDATE users SET balance=1_000, debt=14_900, debt_principal=14_900, debt_interest_at=? WHERE guild_id=? AND user_id=?",
-            (NOW, G, A),
-        )
+        set_test_balance(eco, A, 1_000, guild_id=G)
+        set_test_debt(eco, A, 14_900, principal=14_900, interest_at=NOW, guild_id=G)
     # 2日後の定期更新: 利息 +298 (15,198) → A-1 で現金 1,000 + 預金 4,000 を回収し 10,198 → 猶予回避
     eco.debt.accrue_all_debt_interest(NOW + 2 * 86400 + 1)
     assert eco.debt.debt_for(G, A) == 10_198
@@ -211,7 +205,7 @@ def test_grace_penalty_and_a1_work_together_in_strict_guild_scope(eco):
     until1 = must(eco.bank.grace_until(A))
     assert until1 > NOW + 23 * HOUR
     with eco.db.tx():
-        eco.db.conn.execute("UPDATE users SET debt=1_000, debt_principal=1_000 WHERE guild_id=? AND user_id=?", (G, A))
+        set_test_debt(eco, A, 1_000, principal=1_000, guild_id=G)
         eco.debt.after_debt_change(G, A)
     assert eco.bank.grace_until(A) is None
     with eco.db.tx():
@@ -485,7 +479,9 @@ def test_shortfall_within_the_trust_is_shared_by_size_and_never_goes_negative(ec
     # 信託の総額を超えた 73万は、熱浴の肩代わりと帝愛共済（#34）の口の持ち主が負担する
     s = eco.bank.bank_status(NOW)
     assert s["excess_unpaid"] == 0
-    charged = eco.db.conn.execute("SELECT kyosai_charged FROM teiai_bank WHERE guild_id=?", (G,)).fetchone()[0]
+    charged = eco.db.conn.execute(
+        "SELECT COALESCE((SELECT charged FROM kyosai_state WHERE guild_id=?), 0)", (G,)
+    ).fetchone()[0]
     assert s["thermostat"]["bailed"] + charged - s["cash"] == pytest.approx(730_000, abs=1)
 
 
@@ -591,14 +587,14 @@ def test_thermostat_columns_are_added_to_an_existing_database(tmp_path):
     from domain import thermostat
 
     path = str(tmp_path / "old.db")
-    repos = open_repositories(path, strict=True).for_guild(G)
-    with repos.db.tx():
-        repos.bank.bank_income_for(G, 1_000, NOW)
-    cash_before = repos.bank.bank_status(NOW)["cash"]
-    repos.db.conn.close()
+    cash_before = 1_000.0
     conn = sqlite3.connect(path)
-    for col in ("thermo_load", "thermo_capacity", "thermo_ts", "bailout_debt", "thermo_burned", "thermo_bailed"):
-        conn.execute(f"ALTER TABLE teiai_bank DROP COLUMN {col}")  # サーモスタット導入前の表に戻す
+    conn.execute(
+        "CREATE TABLE teiai_bank (guild_id INTEGER PRIMARY KEY, cash REAL NOT NULL DEFAULT 0, "
+        "loaned REAL NOT NULL DEFAULT 0, ts REAL NOT NULL DEFAULT 0)"
+    )
+    conn.execute("INSERT INTO teiai_bank (guild_id, cash, loaned, ts) VALUES (?, ?, 0.0, ?)", (G, cash_before, NOW))
+    conn.execute("PRAGMA user_version = 0")
     conn.commit()
     conn.close()
     reopened = open_repositories(path, strict=True).for_guild(G)

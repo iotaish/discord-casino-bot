@@ -16,7 +16,7 @@ class KyosaiRepo(Base):
             if user_id == kyosai.HOUSE or share <= 0:
                 continue
             self._account.ensure(guild_id, user_id)
-            took = -self._account.apply(guild_id, user_id, -share, "共済:超過損失の負担")
+            took = -self._account.apply(guild_id, user_id, -share, "共済:超過損失の負担", kind="kyosai_excess_charge")
             rest = share - took
             if rest > 0:
                 self._account.add_debt_principal(guild_id, user_id, rest)
@@ -26,12 +26,15 @@ class KyosaiRepo(Base):
                     0,
                     self._account.raw_balance(guild_id, user_id),
                     f"共済:超過損失の負担（借金 {rest:,}ペリカ）",
+                    kind="kyosai_excess_charge",
                 )
                 self._account.after_debt_change(guild_id, user_id)
             self._note.note_for(guild_id, user_id, "kyosai_charged", amount=share, debt=rest)
             collected += share
         if collected:
             self._conn.execute(
-                "UPDATE teiai_bank SET kyosai_charged=kyosai_charged+? WHERE guild_id=?", (collected, guild_id)
+                "INSERT INTO kyosai_state (guild_id, charged) VALUES (?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET charged=charged+excluded.charged",
+                (guild_id, collected),
             )
         return collected

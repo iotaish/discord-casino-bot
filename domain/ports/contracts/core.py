@@ -5,7 +5,7 @@ domain/types.py は catalogs を読むため、ポート（domain/ports）から
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, TypedDict, TypeVar
+from typing import TYPE_CHECKING, Generic, NotRequired, TypedDict, TypeVar
 
 from .teiai import CdsRow
 
@@ -143,7 +143,7 @@ class HoldingBook(TypedDict, Generic[RowT]):
 
 
 class UserRow(TypedDict):
-    """ユーザーの口座（users 表の行）。"""
+    """ユーザーの口座・デイリー・成績・借金・破産の結合射影。"""
 
     guild_id: int
     user_id: int
@@ -171,6 +171,8 @@ class LedgerEntry(TypedDict):
     balance_after: int
     reason: str
     ts: float
+    kind: NotRequired[str]
+    counterparty_id: NotRequired[int | None]
 
 
 class PlaySummary(TypedDict):
